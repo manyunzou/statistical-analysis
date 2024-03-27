@@ -1,5 +1,5 @@
 <h1 align="center">Welcome 👋, I'm Mandy</h1>
-<h3 align="center">I am here to share my statistical analysis and machine learning projects.</h3>
+<h3 align="center">Here to share some of my statistical analysis and machine learning projects.</h3>
 
 <p align="left">You can learn more about me via <a href="https://manyunzou.github.io/">my portfolio website</a>.</p>
 
