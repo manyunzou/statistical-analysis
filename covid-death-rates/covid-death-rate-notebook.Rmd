@@ -1,0 +1,205 @@
+---
+title: "Covid-19 Death Case Multiple Linear Regression Model"
+author: "Manyun Zou"
+date: "03/24/2023"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+## Introduction
+
+Many news articles have been blaming one thing or another for Covid death rates, including vaccination, population composition, shortage of hospital beds, and others. In this project, I am curious about the relationship between the share of old people and death cases. My hypothesis is: do more old people lead to more Covid-19 **death cases**? Old people are defined as those who age more than 65 years old.
+
+The source of data is Our World in Data, a project by the University of Oxford that hosts various datasets targeting poverty, disease, hunger, climate change, war, existential risks, and inequality problems. Since March 2020, they have been running a dashboard named Covid-19 Data Explorer, which compiled data from John Hopkins University, World Health Organization, and other official sources. Even though John Hopkins University has stopped updating its Covid data, Our World in Data still updates its dashboard because they think Covid-19 is still a big problem to study, such as long Covid effect.
+
+The dataset contains many attributes, but for the purpose of this project, I only kept the following attributes: each country's total death number, population density, the share of the population that is 65 years and older, the total number of people who received all doses vaccine, GDP per capita, and hospital beds per 1000 people. The data was collected as of March 21, 2023.
+
+## Data Preparation
+
+My dependent variable is the total Covid-19 death cases in each country. I am sure that many variables would affect the death case, but I wonder which has a more substantial effect. In my hypothesis, the major factors should be the vaccinated population and population density. But I wonder if the share of old people would play a statistically significant role.
+
+My independent variables are as follows: (1) the share of the 65+-year-old population, which I expect to surge the death cases; (2) the fully vaccinated population, which I expect to decrease the number of death cases; (3) population density, which I expect to increase the death cases; (4) GDP per capita, which I expect to bring down the death case; (5) hospital beds per 1000 people, which also decreases the death number.
+
+```{r}
+# First, we load the dataset and take a peek at the head of the table.
+covid <- read.csv('covid.csv', sep=",", header=TRUE)
+
+# since nearly half of the countries don't have vaccination data, we will only focus on the countries with vaccination data to increase accuracy.
+covid <- covid[!is.na(covid$people_vaccinated),]
+
+# For the rest of NA values in the table, we will fill them with median values.
+median_total_cases <- median(covid$total_cases, na.rm = TRUE)
+median_total_deaths <- median(covid$total_deaths, na.rm = TRUE)
+
+median_people_vaccinated <- median(covid$people_vaccinated, na.rm = TRUE)
+median_people_fully_vaccinated <- median(covid$people_fully_vaccinated, na.rm = TRUE)
+
+median_population_density <- median(covid$population_density, na.rm = TRUE)
+median_aged_65_older <- median(covid$aged_65_older, na.rm = TRUE)
+
+median_gdp_per_capita <- median(covid$gdp_per_capita, na.rm = TRUE)
+median_hospital_beds_per_thousand <- median(covid$hospital_beds_per_thousand, na.rm = TRUE)
+
+# Assign the median to each column's NA value
+covid[["total_cases"]][is.na(covid[["total_cases"]])] <- median_total_cases
+covid[["total_deaths"]][is.na(covid[["total_deaths"]])] <- median_total_deaths
+
+covid[["people_vaccinated"]][is.na(covid[["people_vaccinated"]])] <- median_people_vaccinated
+covid[["people_fully_vaccinated"]][is.na(covid[["people_fully_vaccinated"]])] <- median_people_fully_vaccinated
+
+covid[["population_density"]][is.na(covid[["population_density"]])] <- median_population_density
+covid[["aged_65_older"]][is.na(covid[["aged_65_older"]])] <- median_aged_65_older
+
+covid[["gdp_per_capita"]][is.na(covid[["gdp_per_capita"]])] <- median_gdp_per_capita
+covid[["hospital_beds_per_thousand"]][is.na(covid[["hospital_beds_per_thousand"]])] <- median_hospital_beds_per_thousand
+
+# preview the recoded data
+head(covid)
+```
+The units of each variable:
+(1) total deaths: case
+(2) total vaccinated: a person
+(3) population density: people per square kilometer
+(4) aged 65 older population share: Percentage
+(5) GDP per capita: dollars
+(6) hospital beds per thousand: bed
+
+
+## Bivariate Regression Tests
+
+```{r}
+# First, run a bivariate regressions on the main variables of my main question: the effect of old people population share on Covid deaths
+
+bv1 <- lm(total_deaths ~ aged_65_older,data=covid)
+summary(bv1)
+```
+The result implies that the share of old people has a positive effect on the death number, but its effect is not statistically significant, as the p-value is larger tan 0.05.
+
+```{r}
+# Second, run a bivariate regressions on the effect of vaccinated people on Covid deaths
+
+bv2 <- lm(total_deaths ~ people_fully_vaccinated,data=covid)
+summary(bv2)
+```
+The result implies that the vaccinated population has a weak positive effect on the death number, and its effect is statistically significant.
+
+```{r}
+# After that, run a bivariate regressions on the effect of population density on Covid deaths
+
+bv4 <- lm(total_deaths ~ population_density,data=covid)
+summary(bv4)
+```
+The population density has no statistically significant effect on the death number, as the p-value is larger than 0.05. And it seems like population density has a negative effect on the death number. I wonder if it has anything to do with the relationship between population density and a country's economic situation.
+
+```{r}
+# Hence, run a bivariate regressions on the effect of gdp per capita on Covid deaths
+
+bv5 <- lm(total_deaths ~gdp_per_capita, data=covid)
+summary(bv5)
+```
+The GDP per capita also has no statistically significant effect on the death number. 
+
+```{r}
+# Maybe it has something to do with hospital bed?
+
+bv6 <- lm(total_deaths ~ hospital_beds_per_thousand, data=covid)
+summary(bv6)
+
+```
+The hospital bed volume also doesn't have a statistically significant effect on the Covid death number in the bivariate regression. 
+
+## Full Multiple Regression Model
+
+```{r results='asis'}
+library(stargazer)
+
+# Now, run my full multiple regression
+mr <- lm(total_deaths ~ aged_65_older + people_fully_vaccinated + population_density + gdp_per_capita+ hospital_beds_per_thousand, data=covid)
+
+
+stargazer(mr, no.space=TRUE, dep.var.labels=c("Covid death numbers"), 
+          covariate.labels=c("65+ population share","Fully vaccinated people", 
+                             "Population density","GDP per capita","Hospital beds per thousand people"), 
+          omit.stat=c("LL","ser","f"),header=FALSE,type="latex")
+
+#summary(mr)
+```
+The result above tells me that when holding other variables constant, the fully vaccinated population share is the only one that has a statistically significant effect, even though its effect is small, as increasing one fully vaccinated person would result in 0.0008 more Covid death.
+
+Some other variables do have a substantial effect, such as old population share, population density, and hospital beds per thousand, but their effects are NOT statistically significant, as their P-values are larger than 0.05.
+
+So I guess that, according to this result, the only thing I can intervene in is the vaccination rate, but it has very little effect on the death cases. And intuitively speaking, I don't think bringing down the vaccination rate is a good idea, as it may lead to more death in the long term.
+
+
+### Reflection on my hypothesis
+
+(1) My hypothesis of the old population share increasing the death case does not match the result. I guess it is because the share of old people doesn't necessarily cause more Covid-19 deaths. After all, the government can enact many policies to protect them from being infected or to be treated faster. 
+
+(2) My hypothesis of a vaccinated population decreasing the death case doesn't match the result, as I thought more vaccination would bring the death volume down. I guess the vaccination variable has some indirect effects on the death volume but I failed to find that direct variable X in this dataset. 
+
+(3) My hypothesis of population density increasing the death case also doesn't match the result. Similarly, I guess high population density doesn't necessarily cause more deaths, as helpful policies can prevent the spread of disease and cure the disease more effectively. 
+
+(4) My hypothesis of GDP per capita decreasing the death case doesn't match the result. A country's economic development alone cannot shield it from the spread of disease. 
+
+(5) My hypothesis of hospital beds decreasing the number of death cases doesn't fit the result. Although it has a negative effect, the effect is not statistically significant, which means that the bed number itself cannot reflect a country's ability to cure.  Perhaps we need other indicators, such as available doctors per 1000 people or available nurses per 1000 people.
+
+The R-square measures how much of the variation in Y is explained by the model. In this case, it showcases that 38.01% of the Y is explained by the model. 
+
+The adjusted R-square is to avoid over fitting problems. In this case, the adjusted R2 is 0.3409, which is not much smaller than the original R2, and it means that most of the variables included in the model have explanatory power.
+
+## Variable Selection
+
+I would like to use criterion-based methods to test the effect of each variable, which is to compare adjusted R-square step by step. I would start with the vaccinated people variable, as it is the only statistically significant one in my multiple regression model. 
+
+```{r}
+mr2 <- lm(total_deaths ~ people_fully_vaccinated, data=covid)
+
+summary(mr2)
+```
+Then I will add population density, as it has a lower p-value in the multiple regression model.
+
+```{r}
+mr3 <- lm(total_deaths ~ people_fully_vaccinated + population_density, data=covid)
+
+summary(mr3)
+```
+
+However, the adjusted R-squared went down, from 0.3286 to 0.3217. So population density is not the good one to add. Then I will move to the population share of old people, as it is my main focus of this multiple regression model. 
+
+```{r}
+mr4 <- lm(total_deaths ~ people_fully_vaccinated + aged_65_older, data=covid)
+
+summary(mr4)
+```
+
+The adjusted R-square went up!! From 0.3286 to 0.356. And, with this combination, the aged population variable also becomes statistically significant!!
+
+Okay, so next, I will try gdp_per_capita variable.
+
+```{r}
+mr5 <- lm(total_deaths ~ people_fully_vaccinated + aged_65_older + gdp_per_capita, data=covid)
+
+summary(mr5)
+```
+But the adjusted R-square went down again, from 0.356 to 0.3505. So the gdp_per_capita is not a good add-on.
+
+Lastly, I will try hospital_beds_per_thousand.
+
+```{r}
+mr6 <- lm(total_deaths ~ people_fully_vaccinated + aged_65_older + hospital_beds_per_thousand, data=covid)
+
+summary(mr6)
+```
+
+The adjusted R-square went down again, from 0.356 to 0.3481.
+
+Therefore, I would only keep people_fully_vaccinated and aged_65_older as the independent variables for this multiple regression model. I am happy with the result because at least my main focus for the model (the share of old people) does somehow affect the death number. But I am surprised that the other independent variables failed to have statistically significant effects.
+
+## Overall Conclusions
+
+Overall, my conclusion is that the multiple regression model can explain some reasons behind the death number: the volume of the vaccinated population has some effects on the aged population, as older people are more vulnerable to the disease and need to be vaccinated to prevent them from being infected. Other variables, despite being discussed a lot in the public media, such as hospital beds and population density, don't have much effect on the Covid death numbers.
+
+However, I think that my model still misses one or more key variables, which can explain the weak positive relationship between the vaccinated population and the death numbers. If available, I think I need to try more variables related to vaccination, such as vaccination price, government subsidies, and vaccination accessibility, to see if they have statistically significant effects on the death numbers.
+
