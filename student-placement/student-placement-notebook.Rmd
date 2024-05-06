@@ -1,0 +1,648 @@
+---
+title: "An Ensemble Model to Predict Student Placement Status"
+author: "Manyun Zou"
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document:
+    df_print: paged
+---
+
+```{r}
+# don't show warning text
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+
+# Loading all the packages here
+library(corrplot)
+library(dplyr)
+library(tidyr)
+library(gmodels)
+library(ggplot2)
+library(reshape2)
+library(psych)
+library(class)
+library(caret)
+library(rpart) # decision trees
+library(C50) # decision trees
+library(kernlab) # svm
+library(randomForest) # random forest
+library(irr) # to calculate kappa
+library(mlbench)
+library(pROC)
+```
+
+# 1. Data Acquisition
+```{r}
+sheet_id <- "1mo7Q3c42sOJEC5y85NsBeRws4TquCJHS"
+placement <- read.csv(sprintf("https://docs.google.com/uc?id=%s&export=download", sheet_id))
+str(placement)
+```
+
+The dataset I am using for my final project is the Campus Recruitment dataset acquired from Kaggle (https://www.kaggle.com/datasets/benroshan/factors-affecting-campus-placement). This dataset records a total of 215 students' interview information and whether they get a placement or not.
+
+The columns in the dataset represent the following information:
+- gender: gender,
+- ssc_p: secondary education percentage - how much scores the students get in the 10th grade. For instance, if one student get 120/200 in their 10th grade, the percentage would be 60%. In other words, the higher the percentage is, the better the student perform in that grade. The same explanation does apply to all following columns with "percentage."
+- ssc_b: secondary education board of education - central/others
+- hsc_p: higher secondary education percentage - 12th grade,
+- hsc_b: higher secondary education board of education - central/others,
+- hsc_s: specialization in higher secondary education,
+- degree_p: degree percentage,
+- degree_t: undergraduate field of degree,
+- workex: work experience,
+- etest_p: employability test percentage,
+- specialisation: MBA specialization,
+- mba_p: MBA percentage,
+- status: status of placement,
+- salary: salary offered by corporate to candidates.
+
+The purpose of this project is to develop a model to project the candidates' placement result, which is represented by "status" column - "Placed" and "Not Placed." This would be a classification task.
+
+# 2. Data Exploration
+
+```{r}
+# drop the id column
+drops <- c("sl_no")
+placement <- placement[ , !(names(placement) %in% drops)]
+
+# drop the salary column
+# since it is not our target variable and is not suited for predictors either
+drops2 <- c("salary")
+placement <- placement[ , !(names(placement) %in% drops2)]
+
+# read other columns
+str(placement)
+```
+
+```{r}
+# exploring categorical features
+table(placement$gender)
+table(placement$ssc_b)
+table(placement$hsc_b)
+table(placement$hsc_s)
+table(placement$degree_t)
+table(placement$workex)
+table(placement$specialisation)
+table(placement$status)
+```
+As shown above, we can see that in this dataset, all the categorical features have 2 to 3 categories. We can apply dummy coding or one-hot encoding accordingly later.
+
+```{r}
+# exploring numeric features
+summary(placement[c("ssc_p","hsc_p","degree_p","etest_p", "mba_p")])
+```
+
+```{r}
+# Only keep the numerical features
+categorical_features <- c("gender","ssc_b","hsc_b","hsc_s","degree_t","workex","specialisation","status")
+placement_numeric <- placement[ , !(names(placement) %in% categorical_features)]
+ggplot(data = melt(placement_numeric), aes(x=variable, y=value)) +  geom_point(aes(colour=variable))
+```
+
+As shown above, since all the numerical features are percentages, their ranges are relatively similar to each other, from 40% to 100%.
+
+Next, I want to see if there are any missing values in the dataset.
+```{r identify-missing-values}
+# identify missing values
+any(is.na(placement))
+```
+
+There is no missing value in the dataset. But just for demonstration purpose, I will impute missing data as following:
+```{r impute-missing-data}
+# (imagine if the dataset has already splited into test and train sets)
+# impute missing data in training set
+#placementTrain <- placementTrain %>%  mutate(across(where(is.numeric), ~replace_na(., median(., na.rm=TRUE))))
+
+# impute missing data in test set
+#placementTest <- placementTest %>%  mutate(across(where(is.numeric), ~replace_na(., median(., na.rm=TRUE))))
+```
+
+And if there are any outliers.
+```{r}
+lapply(X=c("ssc_p", "hsc_p", "degree_p", "etest_p", "mba_p"),FUN=function(s)boxplot(placement[,s],main=paste("Box plot of",s),xlab=s))
+```
+
+As shown in the box plot, there are some outliers in the numeric variables. And I can find them out using z-score.
+```{r}
+# detect outliers using z-index
+
+# z-index function
+findOutliers <- function(x){
+  m <- mean(x)
+  sd <- sd(x)
+  z <- abs((x - m) / sd)
+  rows.outliers <- which(z > 2.5)
+  return (rows.outliers)
+}
+
+# find rows with outliers
+sapply(placement_numeric[1:5], findOutliers)
+#apply(student[5:16], findOutliers)
+```
+As shwon above, according to the Z-index, there are 7 outliers in the dataset, not a large portion. I will remove them.
+```{r}
+out_ind <- sapply(placement_numeric[1:5], findOutliers)
+out_ind <- unique(unname(unlist(out_ind)))
+
+# remove outliers from the original dataset
+placement.no <- placement[-c(out_ind), ]
+```
+
+Now we will use correlation analysis to see if numerical predictors are related to the target variable.
+```{r}
+# first to encode the target variable
+categorical_features <- c("gender","ssc_b","hsc_b","hsc_s","degree_t","workex","specialisation")
+payment_numeric <- placement[ , !(names(placement) %in% categorical_features)] %>%
+  mutate(status = ifelse(status=="Placed", 1, 0))
+
+#visualize a correlation matrix for numeric variables
+M <- cor(payment_numeric)
+corrplot(M, method="color")
+```
+As shown above, the placement status is somewhat related to "ssc_p" (secondary education test percentage), "hsc_p" (higher secondary education test percentage), "degree_p" (degree test percentage) but not much correlated with "etest_p" (employability test percentage) and "mba_p" (MBA test percentage).
+
+I will use chi-squared test to test the association among categorical variables.
+```{r}
+# Null hypothesis: the variables are independent. If p <0.05, we must reject the null hypothesis.
+# Chi-square test Reference: https://support.minitab.com/en-us/minitab/help-and-how-to/statistics/tables/how-to/cross-tabulation-and-chi-square/interpret-the-results/key-results/
+# http://www.sthda.com/english/wiki/chi-square-test-of-independence-in-r#google_vignette
+
+categorical_features <- c("gender","ssc_b","hsc_b","hsc_s","degree_t","workex","specialisation","status")
+placement_categorical <- placement[ , (names(placement) %in% categorical_features)]
+#head(placement_categorical)
+```
+
+Next I will run chi-squared test for categorical features.
+```{r}
+# chi-squared test for gender
+lapply(placement_categorical[,-1], function(x) chisq.test(placement_categorical[,1], x))
+```
+As shown above, the gender feature is not associated with any other categorical feature.
+
+```{r}
+# chi-squared test for ssc_b
+lapply(placement_categorical[,-2], function(x) chisq.test(placement_categorical[,2], x))
+```
+The "ssc_b" has association with "hsc_b" since the p value is smaller than 0.05. Hence, I may eliminate one of these features later.
+```{r}
+# chi-squared test for hsc_b
+lapply(placement_categorical[,-3], function(x) chisq.test(placement_categorical[,3], x))
+```
+Again, the "hsc_b" and "ssc_b" have strong association and may be eliminated later.
+
+```{r}
+# chi-squared test for hsc_s
+lapply(placement_categorical[,-4], function(x) chisq.test(placement_categorical[,4], x))
+```
+The "hsc_s" has association with "degree_t" and "specialisation." Hence, I may remove "hsc_s" feature later.
+
+```{r}
+# chi-squared test for degree_t
+lapply(placement_categorical[,-5], function(x) chisq.test(placement_categorical[,5], x))
+```
+The "degree_t" has strong association with "hsc_s." The later one may be removed later, as it has strong association with two other features.
+
+```{r}
+# chi-squared test for workex
+lapply(placement_categorical[,-6], function(x) chisq.test(placement_categorical[,6], x))
+```
+The "workex" has fairly strong association with "specialisation" and target variable "status."
+
+```{r}
+# chi-squared test for specialisation
+lapply(placement_categorical[,-7], function(x) chisq.test(placement_categorical[,7], x))
+```
+The "specialisation" has association with "hsc_s", "workex" and target variable "status." 
+
+```{r}
+# evaluation of distribution
+lapply(X=c("ssc_p", "hsc_p", "degree_p", "etest_p", "mba_p"),FUN=function(s)hist(placement[,s],main=paste("Hist of",s),xlab=s))
+```
+As shwon above, all the numeric variables are somewhat normally distributed.
+
+# 3. Data Cleaning & Shaping
+```{r split-train-test}
+# split into train and test sets
+set.seed(111)
+
+# set samples range
+samples <- sample.int(n = nrow(placement), size = floor(.7*nrow(placement)), replace = F)
+
+# for k-NN
+# train set
+placementTrain <- placement[samples, 1:12]
+# validation test
+placementTest <- placement[-samples, 1:12]
+# save target variable separately
+placementTrain.labels <- placement[samples, 13]
+placementTest.labels <- placement[-samples, 13]
+
+# for Decision Trees
+placementTrain_tree <- placement[samples, ]
+placementTest_tree <- placement[-samples, ]
+```
+
+Next, we will normalize the numerical features for the k-NN algorithm model using Z-score standardization. Because Decision Trees and OneR Rule Learners do not need normalization, we will save the normalized data in another dataframe.
+```{r z-score-standardization}
+set.seed(111)
+
+# create Z-score Standardization
+z_standardization <- function(data) {
+  standardized.df <- data.frame(matrix(ncol = ncol(data), nrow=nrow(data)))
+  names(standardized.df) <- names(data)
+  
+  for (i in seq_along(data)){
+      column_data <- data[[i]]
+      mean_value <- mean(column_data, na.rm=TRUE)
+      sd_value <- sd(column_data, na.rm=TRUE)
+      standardized.df[[i]] <- (column_data - mean_value) / sd_value
+  }
+  
+  return (standardized.df)
+}
+
+# normalize the numerical features in train set
+placementTrain_numeric <- placementTrain[, !(colnames(placementTrain) %in% c("gender", "ssc_b","hsc_b", "hsc_s", "degree_t", "workex", "specialisation"))]
+# create a new standardization dataset
+placementTrain.standardized <- z_standardization(placementTrain_numeric)
+#studentTrain.standardized <- as.data.frame(scale(studentTrain_numeric))
+
+# add categorical features to the new dataset
+placementTrain.standardized$gender <- placementTrain$gender
+placementTrain.standardized$ssc_b <- placementTrain$ssc_b
+placementTrain.standardized$hsc_b <- placementTrain$hsc_b
+placementTrain.standardized$hsc_s <- placementTrain$hsc_s
+placementTrain.standardized$degree_t <- placementTrain$degree_t
+placementTrain.standardized$workex <- placementTrain$workex
+placementTrain.standardized$specialisation <- placementTrain$specialisation
+
+# normalize the numerical features in test set
+placementTest_numeric <- placementTest[, !(colnames(placementTest) %in% c("gender", "ssc_b","hsc_b", "hsc_s", "degree_t", "workex", "specialisation"))]
+placementTest.standardized <-  z_standardization(placementTest_numeric)
+placementTest.standardized$gender <- placementTest$gender
+placementTest.standardized$ssc_b <- placementTest$ssc_b
+placementTest.standardized$hsc_b <- placementTest$hsc_b
+placementTest.standardized$hsc_s <- placementTest$hsc_s
+placementTest.standardized$degree_t <- placementTest$degree_t
+placementTest.standardized$workex <- placementTest$workex
+placementTest.standardized$specialisation <- placementTest$specialisation
+```
+
+Now we will do some feature engineering. First, we need to encode categorical features.
+```{r encode-categorical-feature}
+# train set
+# dummy coding for binary feature
+placementTrain.standardized$gender <- ifelse(placementTrain.standardized$gender=="M", 1, 0)
+placementTrain.standardized$ssc_b <- ifelse(placementTrain.standardized$ssc_b=="Central", 1, 0)
+placementTrain.standardized$hsc_b <- ifelse(placementTrain.standardized$hsc_b=="Central", 1, 0)
+placementTrain.standardized$workex <- ifelse(placementTrain.standardized$workex=="Yes", 1, 0)
+placementTrain.standardized$specialisation <- ifelse(placementTrain.standardized$specialisation=="Mkt&Fin", 1, 0)
+
+# one-hot coding for other categorical features
+placementTrain.standardized_oneHot <- placementTrain.standardized %>%
+  model.matrix(~ hsc_s + degree_t, data = .) %>%
+  as.data.frame()
+
+placementTrain.standardized <- cbind(placementTrain.standardized, placementTrain.standardized_oneHot[2:5])
+drops <- c("hsc_s", "degree_t")
+placementTrain.standardized <- placementTrain.standardized[ , !(names(placementTrain.standardized) %in% drops)]
+
+# test set
+placementTest.standardized$gender <- ifelse(placementTest.standardized$gender=="M", 1, 0)
+placementTest.standardized$ssc_b <- ifelse(placementTest.standardized$ssc_b=="Central", 1, 0)
+placementTest.standardized$hsc_b <- ifelse(placementTest.standardized$hsc_b=="Central", 1, 0)
+placementTest.standardized$workex <- ifelse(placementTest.standardized$workex=="Yes", 1, 0)
+placementTest.standardized$specialisation <- ifelse(placementTest.standardized$specialisation=="Mkt&Fin", 1, 0)
+
+# one-hot coding for other categorical features
+placementTest.standardized_oneHot <- placementTest.standardized %>%
+  model.matrix(~ hsc_s + degree_t, data = .) %>%
+  as.data.frame()
+
+placementTest.standardized <- cbind(placementTest.standardized, placementTest.standardized_oneHot[2:5])
+drops <- c("hsc_s", "degree_t")
+placementTest.standardized <- placementTest.standardized[ , !(names(placementTest.standardized) %in% drops)]
+```
+
+```{r svm-data-setup}
+# for SVM
+# train data
+placementTrain_svm <- placementTrain.standardized
+placementTrain_svm$status <- as.factor(placementTrain.labels)
+
+# test data
+placementTest_svm <- placementTest.standardized
+placementTest_svm$status <- as.factor(placementTest.labels)
+```
+
+# 4. K-NN model
+
+## 4.1 Model Construction
+```{r}
+set.seed(111)
+student_knn_pred <- knn(train=placementTrain.standardized, test=placementTest.standardized, cl=placementTrain.labels, k=12)
+```
+
+I chose the k = 12 because there are 150 instances in the train set, and by default, the k value should roughly equal to the square root of the instance number. I will test out multiple k values in the model evaluation.
+
+## 4.2 Model Evaluation
+
+### 4.2.1 Confusion Matrix
+```{r k-NN-crosstable}
+confusionMatrix(factor(student_knn_pred, levels=c("Placed","Not Placed")), factor(placementTest.labels, levels=c("Placed", "Not Placed")), positive="Placed")
+```
+As shown above, the overall accuracy of the model is (37+8)/65 = 69.2%. A decent accuracy rate. Looking closer...Also, the Kappa value of 0.28 shows that the model has a fair agreement. Could be better. Looking closer, about 94.9% of "Placed" class is predicted correctly while only 30.8% of "Not Placed" is predicted correctly. This indicates that the model prediction might be affected by the data imbalance because only 27.3% of target variables in the train set belong to the "Not Placed" class.
+
+```{r}
+# ROC curve
+# consider put three curves together
+
+student_knn_pred_num <- ifelse(student_knn_pred=="Placed", 1, 0)
+placementTest.labels_num <- ifelse(placementTest.labels=="Placed", 1, 0)
+
+knn_roc <- roc(student_knn_pred_num, placementTest.labels_num)
+plot(knn_roc, main="ROC curve for kNN classifier", col="blue", lwd=2, grid=TRUE, legacy.axes=TRUE)
+```
+
+## 4.3 Model Tuning & Performance Improvement
+
+### 4.3.1 Alternative k
+
+To improve the k-NN model, we can test alternative values of k. 
+```{r}
+k_values <- c(6,7,8,9,10,11,12,13,14,15)
+k_values_this <- c()
+knn_accuracy_list <- c()
+
+for (k_val in k_values){
+  set.seed(111)
+  student_knn_pred <- knn(train=placementTrain.standardized,
+                      test=placementTest.standardized,
+                      cl=placementTrain.labels,
+                      k=k_val)
+
+  accuracyRate <- 1 - mean(student_knn_pred != placementTest.labels)
+  k_values_this<- c(k_val, k_values_this)
+  knn_accuracy_list <- c(accuracyRate, knn_accuracy_list)
+  #print(j)
+}
+
+knn_improved_accuracy <- data.frame(
+  k_values = k_values_this,
+  accuracy_rate = knn_accuracy_list,
+  stringsAsFactors = FALSE
+)
+
+knn_improved_accuracy
+```
+Surpringsly, the accuracy rate reaches the highest when k=10, which would be my improved hyperparameter. With the new k value, the overall accuracy is boosted from 69.2% to 78.5%. Good improvement!
+
+```{r}
+set.seed(111)
+student_knn_pred <- knn(train=placementTrain.standardized,
+                      test=placementTest.standardized,
+                      cl=placementTrain.labels,
+                      k=10)
+
+confusionMatrix(factor(student_knn_pred, levels=c("Placed","Not Placed")), factor(placementTest.labels, levels=c("Placed", "Not Placed")), positive="Placed")
+```
+Also, when k is set to 10, the precision rate of "Not Placed" class jumps to 50%, which is better than 30.8% before, as well as the share of 27.3% in the train set.
+
+### 4.3.2 Reduce Model Complexity
+
+As shown in the previous section, the "ssc_b" and "hsc_s" are strongly associated with other features but not associated with the target variable. Hence, I will remove these two from the predictor list.
+```{r}
+set.seed(111)
+
+placementTrain.standardized_reduce <- placementTrain.standardized[, !(colnames(placementTrain.standardized) %in% c("ssc_b","hsc_s"))]
+placementTest.standardized_reduce <- placementTest.standardized[, !(colnames(placementTest.standardized) %in% c("ssc_b", "hsc_s"))]
+
+student_knn_pred_reduce <- knn(train=placementTrain.standardized_reduce, test=placementTest.standardized_reduce, cl=placementTrain.labels, k=10)
+
+confusionMatrix(factor(student_knn_pred_reduce, levels=c("Placed","Not Placed")), factor(placementTest.labels, levels=c("Placed", "Not Placed")), positive="Placed")
+```
+However, the decreased complexity doesn't bring up the overall accuracy rate or individual precision rate as much as the updated k value. So I may stick to the new k value.
+
+# 5. Decision Trees
+
+## 5.1 Model Construction
+```{r}
+placementTrain_tree$status <- as.factor(placementTrain_tree$status)
+placementTest_tree$status <- as.factor(placementTest_tree$status)
+# Build the decision tree
+myTree <- C5.0(status ~ ., data = placementTrain_tree, trials=1)
+myTree
+```
+```{r}
+# Predict with the tree model
+mytree_predict <- predict(myTree, newdata = placementTest_tree, type="class")
+```
+
+## 5.2 Model Evaluation
+
+### 5.2.1 Confusion Matrix
+```{r}
+confusionMatrix(factor(mytree_predict, levels=c("Placed", "Not Placed")), factor(placementTest_tree$status, levels=c("Placed", "Not Placed")), positive="Placed")
+```
+The Decision Tree classifer instantly has a higher accuracy rate, reaching 81.5%. Looking closer, 92.3% of "Placed" class is classified correctly while 65.4% of "Not Placed" is predicted correctly. The "Placed" label is more correctly predicted because it is the dominant class, as 60% of the test labels are that. But either way, the individual precision rate is already higher than that of kNN classifier, whether original or improved.
+
+### 5.2.2 k-fold CV
+```{r}
+set.seed(111)
+folds <- createFolds(placement$status, k=10)
+
+cv_results <- lapply(folds, function(x){
+  placement_train <- placement[ -x, ]
+  placement_test <- placement[x, ]
+  placement_train$status <- as.factor(placement_train$status)
+  placement_test$status <- as.factor(placement_test$status)
+  placement_model <- C5.0(status ~., data=placement_train)
+  placement_pred <- predict(placement_model, placement_test)
+  placement_actual <- placement_test$status
+  #kappa <- kappa2(data.frame(placement_actual, placement_pred))$value
+  agree <- table(placement_pred == placement_actual)
+  #print(agree)
+  accuracy <- agree[['TRUE']]/nrow(placement_test)
+  #print(nrow(placement_test))
+  
+  return(accuracy)
+})
+
+cv_results
+```
+```{r}
+# the average of all kappas
+# Question: I keep getting negative kappas score
+mean(unlist(cv_results))
+```
+As shown above, even after the 10-fold cross validation, the decision tree classifier can still reach an accuracy rate of 81.25% on average.
+
+## 5.3 Model Tuning & Performance Improvement
+
+### 5.3.1 Hyperparameters
+
+The Decision Trees have three hyperparameters: model, trials, and winnow. Here I will make trials and winnow part of the control object to tune the model.
+```{r}
+set.seed(111)
+library(mlbench)
+
+fitControl <- trainControl(method="cv",
+                           number = 10,
+                           selectionFunction="oneSE")
+
+grid <- expand.grid(model="tree", trials=c(1,5,10,15,20,25,30,35), winnow=c(TRUE,FALSE))
+
+set.seed(111)
+mdl <- train(status ~., data=placementTrain_tree, method="C5.0", metric="accuracy", trControl=fitControl, tuneGrid=grid)
+
+plot(mdl)
+```
+As shown above, when setting winnow to "False" and trials to 30, the accuracy rate of decision tree classifier can reach the highest at around 86%.
+
+### 5.3.2 Mistake Cost
+
+I can also add mistake costs to boost the accuracy. Since the "Not Placed" class is more easily to be classified as "Placed", I will add more mistake cost to that accordingly.
+```{r}
+matrix_dimensions <- list(c("Placed", "Not Placed"), c("Placed", "Not Placed"))
+names(matrix_dimensions) <- c("predicted", "actual")
+error_cost <- matrix(c(0,5,8,0), nrow=2, dimnames=matrix_dimensions)
+error_cost
+```
+```{r}
+mytree_cost <- C5.0(status ~ ., data = placementTrain_tree, costs=error_cost)
+mytree_cost_pred <- predict(mytree_cost, newdata = placementTest_tree)
+
+confusionMatrix(factor(mytree_cost_pred, levels=c("Placed","Not Placed")), factor(placementTest_tree$status, levels=c("Placed","Not Placed")), positive="Placed")
+```
+And it does boost the overall accuracy a little bit, although the precision rate for "Not Placed" is not lower than the other. I guess the solution might be collecting more "Not Placed" instances in the data.
+
+# 6. SVM
+
+## 6.1 Model Construction
+```{r}
+# train the model
+svm_classifier <- ksvm(status ~., data=placementTrain_svm, kernel="vanilladot")
+# predict with the model
+svm_predictions <- predict(svm_classifier, placementTest_svm)
+```
+
+## 6.2 Model Evaluation
+```{r}
+confusionMatrix(factor(svm_predictions, levels=c("Placed", "Not Placed")),
+                factor(placementTest_svm$status, levels=c("Placed","Not Placed")), positive="Placed")
+```
+
+## 6.3 Model Tuning & Performance Improvement
+```{r}
+# train the model
+svm_classifier_rbf <- ksvm(status ~., data=placementTrain_svm, kernel="rbfdot")
+# predict with the model
+svm_predictions_rbf <- predict(svm_classifier_rbf, placementTest_svm)
+# calculate agreement
+agreement_rbf <- svm_predictions_rbf == placementTest_svm$status
+table(agreement_rbf)
+```
+
+The accuracy rate is 74.6% after changing to radial basis, down from 78.5%.
+
+```{r}
+cost_values <- c(1, seq(from=5, to=40, by=5))
+accuracy_svm_cost <- sapply(cost_values, function(x){
+  set.seed(111)
+  m <- ksvm(status ~., data=placementTrain_svm, kernel="vanilladot", C=x)
+  pred <- predict(m, placementTest_svm)
+  agree <- table(pred == placementTest_svm$status)
+  accuracy <- agree[['TRUE']]/nrow(placementTest_svm)
+  return(accuracy)
+})
+
+plot(cost_values, accuracy_svm_cost, type="b")
+```
+As shown above, the cost parameters of SVM model can only boost the accuracy rate to 83% when C is set to 15.
+
+# 7. Ensemble Model
+
+## 7.1 Homogeneous ensemble
+
+I will be using random forest as my homogeneous ensemble method. 
+
+```{r}
+set.seed(111)
+
+# construct random forests model
+placement_rf <- randomForest(status ~., data=placementTrain_tree, ntree=100)
+placement_rf_predict <- predict(placement_rf, newdata=placementTest_tree)
+# evaluate the model
+confusionMatrix(factor(placement_rf_predict, levels=c("Placed","Not Placed")), factor(placementTest_tree$status, levels=c("Placed","Not Placed")), positive="Placed")
+```
+
+```{r}
+tree_values <- c(50,60,70,80,90,100,110,120,130,140,150)
+tree_this <- c()
+accuracy_rf_list <- c()
+
+for (tree_val in tree_values){
+  set.seed(111)
+  placement_rf <- randomForest(status ~., data=placementTrain_tree, ntree=tree_val)
+  placement_rf_predict <- predict(placement_rf, newdata=placementTest_tree)
+  
+  cm <- confusionMatrix(factor(placement_rf_predict, levels=c("Placed", "Not Placed")), factor(placementTest_tree$status, levels=c("Placed", "Not Placed")))
+  accuracy_val <- cm$overall[['Accuracy']]
+  accuracy_rf_list <- c( accuracy_val, accuracy_rf_list)
+  tree_this <- c(tree_val, tree_this)
+}
+
+rf_improved_accuracy <- data.frame(
+  k_values = tree_this,
+  accuracy_rate = accuracy_rf_list,
+  stringsAsFactors = FALSE
+)
+
+rf_improved_accuracy
+```
+As shown above, the adjustment of tree number doesn't affect the random forest classifier much...
+
+
+## 7.2 Heterogeneous ensemble
+
+```{r}
+set.seed(111)
+
+# Model construction
+placement_ensemble <- function(i, h, j){
+  # knn
+  placement_knn_pred <- knn(train=placementTrain.standardized,
+                            test=i,
+                            cl=placementTrain.labels,
+                            k=10)
+
+  # Decision Trees
+  myTree <- C5.0(status ~ ., data = placementTrain_tree, costs=error_cost, trials=1)
+  mytree_predict <- predict(myTree, newdata = h, type="class")
+  
+  # SVM
+  m <- ksvm(status ~., data=placementTrain_svm, kernel="vanilladot", C=15)
+  svm_pred <- predict(m, j)
+  
+  # merge all the prediction into a dataframe
+  predictOutcome <- data.frame(
+                               model1 = placement_knn_pred,
+                               model2 = mytree_predict,
+                               model3 = svm_pred)
+
+  # select the most frequent one from each row
+  finalPredictOutcome <- apply(predictOutcome, 1, function(x) names(which.max(table(x))))
+  
+  return (finalPredictOutcome)
+}
+
+```
+
+```{r}
+# Model prediction
+placement_ensemble_predict <- placement_ensemble(placementTest.standardized, placementTest_tree, placementTest_svm)
+# evaluate the model
+confusionMatrix(factor(placement_ensemble_predict, levels=c("Placed","Not Placed")), factor(placementTest.labels, levels=c("Placed","Not Placed")))
+```
+As shown above, the heterogeneous ensemble model can result in 83.1% overall accuracy rate.
+
