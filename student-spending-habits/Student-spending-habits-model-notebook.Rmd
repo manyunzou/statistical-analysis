@@ -1,8 +1,6 @@
 ---
 title: 'An Ensemble Model to Categorize the Spending Habits of Students: Development
   and Evaluation'
-subtitle: DA5030
-date: "Spring 2024"
 author: "Manyun Zou"
 output:
   pdf_document: default
